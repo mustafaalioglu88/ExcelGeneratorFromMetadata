@@ -5,7 +5,7 @@ namespace ExcelGeneratorFromMetadata
     internal class Program
     {
         private static readonly bool includeOnlycustomPrefixedAttributes = true;
-        private static readonly string customPrefix = "pfx_";
+        private static readonly string customPrefix = "tse_";
         private static CrmHelper helper;
 
         private static void Main(string[] args)
@@ -26,6 +26,7 @@ namespace ExcelGeneratorFromMetadata
                 var userName = Console.ReadLine();
                 Console.Write("Please type organization user password: ");
                 var password = Console.ReadLine();
+
                 helper = new CrmHelper(url, domain, userName, password);
                 var list = helper.GetEntityModel(entityLogicalNameList, includeOnlycustomPrefixedAttributes,
                     customPrefix);

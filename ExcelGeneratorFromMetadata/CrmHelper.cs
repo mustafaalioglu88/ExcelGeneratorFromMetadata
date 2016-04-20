@@ -5,6 +5,7 @@ using Microsoft.Xrm.Client;
 using Microsoft.Xrm.Client.Services;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
+using Microsoft.Xrm.Sdk.Metadata.Query;
 
 namespace ExcelGeneratorFromMetadata
 {
@@ -73,10 +74,10 @@ namespace ExcelGeneratorFromMetadata
                 {
                     retrieveEntityResponse = (RetrieveEntityResponse)GetSharedOrganizationService().Execute(retrieveEntityRequest);
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    Console.WriteLine("Error while retrieving {0}. Program will now terminate.", entityLogicalName);
-                    break;
+                    Console.WriteLine("Error while retrieving {0}. Detais:\n{1}", entityLogicalName, ex.Message);
+                    continue;
                 }
                 
                 entityModel.DisplayName = retrieveEntityResponse.EntityMetadata.DisplayName.UserLocalizedLabel.Label;
@@ -170,12 +171,67 @@ namespace ExcelGeneratorFromMetadata
                     entityModel.AttributeModelList.Add(attribute);
                 }
 
+                var manyToManyRelationships = retrieveEntityResponse.EntityMetadata.ManyToManyRelationships;
+                if (manyToManyRelationships != null && manyToManyRelationships.Length > 0)
+                {
+                    foreach (var manyToManyRelationshipMetadata in manyToManyRelationships)
+                    {
+                        var attribute = new AttributeModel();
+                        attribute.LogicalName = manyToManyRelationshipMetadata.SchemaName;
+                        attribute.DataType = "N:N ilişki";
+                        attribute.IsRequired = false;
+                        AssociatedMenuConfiguration relation;
+                        
+                        if (manyToManyRelationshipMetadata.Entity1LogicalName != entityLogicalName)
+                        {
+                            attribute.Constraint = "Hedef Varlık: " + manyToManyRelationshipMetadata.Entity1LogicalName;
+                            attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
+                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            {
+                                attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration);
+                            }
+
+                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            {
+                                attribute.DisplayName = manyToManyRelationshipMetadata.Entity1LogicalName + " N:N ilişkisi";
+                            }
+                        }
+						else
+                        {
+                            attribute.Constraint = "Hedef Varlık: " + manyToManyRelationshipMetadata.Entity2LogicalName;
+                            attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration); //
+                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            {
+                                attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
+                            }
+
+                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            {
+                                attribute.DisplayName = manyToManyRelationshipMetadata.Entity2LogicalName + " N:N ilişkisi";
+                            }
+                        }
+                        
+                        entityModel.AttributeModelList.Add(attribute);
+                    }
+                }
+
                 entityModel.AttributeModelList = entityModel.AttributeModelList.OrderBy(model => model.LogicalName).ToList();
 
                 entityModelList.Add(entityModel);
             }
 
             return entityModelList;
+        }
+
+        private string GetUserLocalizedLabel(AssociatedMenuConfiguration entityAssociatedMenuConfiguration)
+        {
+            if (entityAssociatedMenuConfiguration.Label != null && entityAssociatedMenuConfiguration.Label.UserLocalizedLabel != null 
+                && !string.IsNullOrWhiteSpace(entityAssociatedMenuConfiguration.Label.UserLocalizedLabel.Label))
+            {
+                return entityAssociatedMenuConfiguration.Label.UserLocalizedLabel.Label;
+            }
+
+            return string.Empty;
         }
 
         private static string GetOptions(EnumAttributeMetadata enumAttributeMetadata)
