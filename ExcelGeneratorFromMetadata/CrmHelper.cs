@@ -5,7 +5,6 @@ using Microsoft.Xrm.Client;
 using Microsoft.Xrm.Client.Services;
 using Microsoft.Xrm.Sdk.Messages;
 using Microsoft.Xrm.Sdk.Metadata;
-using Microsoft.Xrm.Sdk.Metadata.Query;
 
 namespace ExcelGeneratorFromMetadata
 {
@@ -23,9 +22,9 @@ namespace ExcelGeneratorFromMetadata
                     username, password));
                 crmConnection.Timeout = new TimeSpan(0, 0, 5, 0);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                Console.WriteLine("It seems connection variables are not all correct.");
+                Console.WriteLine("It seems connection variables are not all correct. Or: " + ex);
             }
         }
 
@@ -35,26 +34,23 @@ namespace ExcelGeneratorFromMetadata
             GC.SuppressFinalize(this);
         }
 
-        public OrganizationService GetSharedOrganizationService()
+        private OrganizationService GetSharedOrganizationService()
         {
             return sharedOrganizationService ?? (sharedOrganizationService = new OrganizationService(crmConnection));
         }
 
         private void Dispose(bool disposing)
         {
-            if (disposing)
-            {
-                if (sharedOrganizationService != null)
-                {
-                    sharedOrganizationService.Dispose();
-                    sharedOrganizationService = null;
-                }
-            }
+            if (!disposing) return;
+            if (sharedOrganizationService == null) return;
+
+            sharedOrganizationService.Dispose();
+            sharedOrganizationService = null;
         }
 
-        public List<EntityModel> GetEntityModel(List<string> entityLogicalNameList,
-            bool includeOnlycustomPrefixedAttributes, string customPrefix)
+        public List<EntityModel> GetEntityModel(List<string> entityLogicalNameList, out IList<string> skippedList)
         {
+            skippedList = new List<string>();
             var entityModelList = new List<EntityModel>();
             var requiredReference = new AttributeRequiredLevelManagedProperty(AttributeRequiredLevel.ApplicationRequired);
 
@@ -76,17 +72,26 @@ namespace ExcelGeneratorFromMetadata
                 }
                 catch (Exception ex)
                 {
+                    skippedList.Add(entityLogicalName);
                     Console.WriteLine("Error while retrieving {0}. Detais:\n{1}", entityLogicalName, ex.Message);
+                    continue;
+                }
+
+                if (retrieveEntityResponse.EntityMetadata.IsIntersect.HasValue && retrieveEntityResponse.EntityMetadata.IsIntersect.Value)
+                {
+                    skippedList.Add(entityLogicalName);
                     continue;
                 }
                 
                 entityModel.DisplayName = retrieveEntityResponse.EntityMetadata.DisplayName.UserLocalizedLabel.Label;
+                entityModel.DisplayNamePlural = retrieveEntityResponse.EntityMetadata.DisplayCollectionName.UserLocalizedLabel.Label;
+                entityModel.Description = retrieveEntityResponse.EntityMetadata.Description.UserLocalizedLabel.Label;
                 var attributes = retrieveEntityResponse.EntityMetadata.Attributes;
 
                 Console.WriteLine(entityLogicalName + " attributes are now modelling.");
                 foreach (var attributeMetadata in attributes)
                 {
-                    if (includeOnlycustomPrefixedAttributes && !attributeMetadata.LogicalName.StartsWith(customPrefix))
+                    if (ShouldPassCurrentAttribute(entityLogicalName, attributeMetadata))
                     {
                         continue;
                     }
@@ -96,75 +101,102 @@ namespace ExcelGeneratorFromMetadata
                         continue;
                     }
 
-                    var attribute = new AttributeModel();
-                    attribute.LogicalName = attributeMetadata.LogicalName;
-                    attribute.DisplayName = attributeMetadata.DisplayName.UserLocalizedLabel.Label;
-                    attribute.DataType = attributeMetadata.AttributeType.HasValue
-                        ? attributeMetadata.AttributeType.Value.ToString()
-                        : string.Empty;
+                    var localLangCode = attributeMetadata.DisplayName.UserLocalizedLabel.LanguageCode;
+                    var otherLangDisplay = (from langs in attributeMetadata.DisplayName.LocalizedLabels where langs.LanguageCode != localLangCode select langs).ToList();
+                    var otherLangDescription = (from langs in attributeMetadata.Description.LocalizedLabels where langs.LanguageCode != localLangCode select langs).ToList();
+                    var otherDisplayName = string.Empty;
+                    var otherDescription = string.Empty;
+
+                    if(otherLangDisplay.Count > 0)
+                    {
+                        otherDisplayName = otherLangDisplay.First().Label;
+                    }
+
+                    if (otherLangDescription.Count > 0)
+                    {
+                        otherDescription = otherLangDescription.First().Label;
+                    }
+
+                    var attribute = new AttributeModel
+                    {
+                        LogicalName = attributeMetadata.SchemaName,
+                        DisplayName = attributeMetadata.DisplayName.UserLocalizedLabel.Label,
+                        Description = attributeMetadata.Description.UserLocalizedLabel != null ? attributeMetadata.Description.UserLocalizedLabel.Label : string.Empty,
+                        OtherDisplayName = otherDisplayName,
+                        OtherDescription = otherDescription,
+                        DataType = attributeMetadata.AttributeType.HasValue
+                            ? attributeMetadata.AttributeType.Value.ToString()
+                            : string.Empty
+                    };
                     if (attribute.DataType.Equals("Lookup", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = "Hedef Varlık: " +
-                                               ((LookupAttributeMetadata) (attributeMetadata)).Targets[0];
+                        attribute.DataType = "Lookup";
+                        attribute.LookupEntityLogicalName = ((LookupAttributeMetadata) (attributeMetadata)).Targets[0];
                     }
                     else if (attribute.DataType.Equals("String", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((StringAttributeMetadata) (attributeMetadata)).MaxLength + " Karakter";
+                        attribute.DataType = "SingleLine";
+                        attribute.MaxValue = ((StringAttributeMetadata) (attributeMetadata)).MaxLength.ToString();
                     }
                     else if (attribute.DataType.Equals("Decimal", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((DecimalAttributeMetadata) (attributeMetadata)).Precision + " ondalık, " +
-                                               ((DecimalAttributeMetadata) (attributeMetadata)).MinValue + "-" +
-                                               ((DecimalAttributeMetadata) (attributeMetadata)).MaxValue + " Max";
+                        attribute.DataType = "decimal";
+                        attribute.MinValue = ((DecimalAttributeMetadata) (attributeMetadata)).MinValue.ToString();
+                        attribute.MaxValue = ((DecimalAttributeMetadata)(attributeMetadata)).MaxValue.ToString();
+                        //attribute.Precision = ((DecimalAttributeMetadata)(attributeMetadata)).Precision;
                     }
                     else if (attribute.DataType.Equals("Integer", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((IntegerAttributeMetadata) (attributeMetadata)).MinValue + "-" +
-                                               ((IntegerAttributeMetadata) (attributeMetadata)).MaxValue;
+                        attribute.DataType = "int";
+                        attribute.MinValue = ((IntegerAttributeMetadata)(attributeMetadata)).MinValue.ToString();
+                        attribute.MaxValue = ((IntegerAttributeMetadata)(attributeMetadata)).MaxValue.ToString();
                     }
                     else if (attribute.DataType.Equals("Boolean", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = "Default: " +
+                        attribute.DataType = "bool";
+                        /*attribute.Constraint = "Default: " +
                                                (((BooleanAttributeMetadata) (attributeMetadata)).DefaultValue.HasValue
                                                    ? ((BooleanAttributeMetadata) (attributeMetadata)).DefaultValue
                                                        .ToString()
-                                                   : "false");
+                                                   : "false");*/
                     }
                     else if (attribute.DataType.Equals("Memo", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((MemoAttributeMetadata) (attributeMetadata)).MaxLength + " Karakter";
-                    }
-                    else if (attribute.DataType.Equals("Enum", StringComparison.InvariantCultureIgnoreCase))
-                    {
-                        attribute.Constraint = GetOptions((EnumAttributeMetadata) (attributeMetadata));
+                        attribute.DataType = "Multiline";
+                        attribute.MaxValue = ((MemoAttributeMetadata)(attributeMetadata)).MaxLength.ToString();
                     }
                     else if (attribute.DataType.Equals("Money", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((MoneyAttributeMetadata) (attributeMetadata)).Precision + " ondalık, " +
-                                               ((MoneyAttributeMetadata) (attributeMetadata)).MinValue + "-" +
-                                               ((MoneyAttributeMetadata) (attributeMetadata)).MaxValue + " Max";
+                        attribute.DataType = "Money";
+                        attribute.MinValue = ((MoneyAttributeMetadata)(attributeMetadata)).MinValue.ToString();
+                        attribute.MaxValue = ((MoneyAttributeMetadata)(attributeMetadata)).MaxValue.ToString();
+                        //attribute.Constraint = ((MoneyAttributeMetadata)(attributeMetadata)).Precision;
                     }
                     else if (attribute.DataType.Equals("BigInt", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = ((BigIntAttributeMetadata) (attributeMetadata)).MinValue + "-" +
-                                               ((BigIntAttributeMetadata) (attributeMetadata)).MaxValue;
+                        attribute.DataType = "int";
+                        attribute.MinValue = ((BigIntAttributeMetadata)(attributeMetadata)).MinValue.ToString();
+                        attribute.MaxValue = ((BigIntAttributeMetadata)(attributeMetadata)).MaxValue.ToString();
                     }
                     else if (attribute.DataType.Equals("DateTime", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        var dateTimeFormat = ((DateTimeAttributeMetadata) (attributeMetadata)).Format;
+                        attribute.DataType = "DateTime";
+                        /*var dateTimeFormat = ((DateTimeAttributeMetadata) (attributeMetadata)).Format;
                         if (dateTimeFormat != null)
                         {
                             attribute.Constraint = dateTimeFormat.Value.ToString();
-                        }
+                        }*/
                     }
                     else if (attribute.DataType.Equals("Picklist", StringComparison.InvariantCultureIgnoreCase))
                     {
-                        attribute.Constraint = GetOptions((PicklistAttributeMetadata) (attributeMetadata));
-                    }
-                    else if (attribute.DataType.Equals("Uniqueidentifier", StringComparison.InvariantCultureIgnoreCase))
-                    {
-                        attribute.Constraint = "Guid";
-                        attribute.IsRequired = true;
+                        attribute.DataType = "OptionSet";
+                        var localType = ((PicklistAttributeMetadata) (attributeMetadata));
+                        if(localType.OptionSet.IsGlobal.HasValue && localType.OptionSet.IsGlobal.Value)
+                        {
+                            attribute.GlobalOptionSetListLogicalName = localType.OptionSet.Name;
+                            attribute.DataType = "GlobalOptionSet";
+                        }
+                        attribute.OptionSetList = GetOptions(localType);
                     }
 
                     attribute.IsRequired = attributeMetadata.RequiredLevel.Value == requiredReference.Value;
@@ -176,41 +208,52 @@ namespace ExcelGeneratorFromMetadata
                 {
                     foreach (var manyToManyRelationshipMetadata in manyToManyRelationships)
                     {
-                        var attribute = new AttributeModel();
-                        attribute.LogicalName = manyToManyRelationshipMetadata.SchemaName;
-                        attribute.DataType = "N:N ilişki";
-                        attribute.IsRequired = false;
-                        AssociatedMenuConfiguration relation;
-                        
-                        if (manyToManyRelationshipMetadata.Entity1LogicalName != entityLogicalName)
+                        var attribute = new AttributeModel
                         {
-                            attribute.Constraint = "Hedef Varlık: " + manyToManyRelationshipMetadata.Entity1LogicalName;
-                            attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
-                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            LogicalName = manyToManyRelationshipMetadata.SchemaName,
+                            DataType = "NN",
+                            IsRequired = false
+                        };
+
+                        string mainEntityDisplay;
+                        string relationEntityDisplay;
+                        if (manyToManyRelationshipMetadata.Entity1LogicalName == entityLogicalName)
+                        {
+                            attribute.LookupEntityLogicalName = manyToManyRelationshipMetadata.Entity2LogicalName;
+                            attribute.Description = "1";
+
+                            mainEntityDisplay = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration);
+                            if (string.IsNullOrWhiteSpace(mainEntityDisplay))
                             {
-                                attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration);
+                                mainEntityDisplay = entityLogicalName;
                             }
 
-                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            relationEntityDisplay = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
+                            if (string.IsNullOrWhiteSpace(relationEntityDisplay))
                             {
-                                attribute.DisplayName = manyToManyRelationshipMetadata.Entity1LogicalName + " N:N ilişkisi";
+                                relationEntityDisplay = manyToManyRelationshipMetadata.Entity2LogicalName;
                             }
                         }
 						else
                         {
-                            attribute.Constraint = "Hedef Varlık: " + manyToManyRelationshipMetadata.Entity2LogicalName;
-                            attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration); //
-                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            attribute.LookupEntityLogicalName = manyToManyRelationshipMetadata.Entity1LogicalName;
+                            attribute.Description = "2";
+
+                            mainEntityDisplay = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
+                            if (string.IsNullOrWhiteSpace(mainEntityDisplay))
                             {
-                                attribute.DisplayName = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity2AssociatedMenuConfiguration);
+                                mainEntityDisplay = entityLogicalName;
                             }
 
-                            if (string.IsNullOrWhiteSpace(attribute.DisplayName))
+                            relationEntityDisplay = GetUserLocalizedLabel(manyToManyRelationshipMetadata.Entity1AssociatedMenuConfiguration);
+                            if (string.IsNullOrWhiteSpace(relationEntityDisplay))
                             {
-                                attribute.DisplayName = manyToManyRelationshipMetadata.Entity2LogicalName + " N:N ilişkisi";
+                                relationEntityDisplay = manyToManyRelationshipMetadata.Entity2LogicalName;
                             }
                         }
-                        
+
+                        attribute.DisplayName = mainEntityDisplay + ";" + relationEntityDisplay;
+
                         entityModel.AttributeModelList.Add(attribute);
                     }
                 }
@@ -221,6 +264,26 @@ namespace ExcelGeneratorFromMetadata
             }
 
             return entityModelList;
+        }
+
+        private static bool ShouldPassCurrentAttribute(string entityLogicalName, AttributeMetadata attributeMetadata)
+        {
+            if (Settings.EntityIncludeAllList.Contains(entityLogicalName))
+            {
+                return false;
+            }
+
+            if(Settings.AttributeIncludeList.Contains(attributeMetadata.LogicalName))
+            {
+                return false;
+            }
+
+            if(Settings.IncludeOnlycustomPrefixedAttributes && !attributeMetadata.LogicalName.StartsWith(Settings.CustomPrefix))
+            {
+                return true;
+            }
+
+            return false;
         }
 
         private string GetUserLocalizedLabel(AssociatedMenuConfiguration entityAssociatedMenuConfiguration)
@@ -251,10 +314,10 @@ namespace ExcelGeneratorFromMetadata
                     continue;
                 }
 
-                returnStr += option.Value + "-" + option.Label.UserLocalizedLabel.Label + ", ";
+                returnStr += option.Label.UserLocalizedLabel.Label + "=" + option.Value + ";";
             }
 
-            return returnStr.Substring(default(int), returnStr.Length - ", ".Length);
+            return returnStr.Substring(default(int), returnStr.Length - ";".Length);
         }
     }
 }
